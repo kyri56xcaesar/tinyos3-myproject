@@ -37,6 +37,11 @@ typedef struct pipe_control_block {
 
 } Pipe_CB;
 
+int pipe_write(void* pipe_cb, const char* buffer, uint n);
+int pipe_read(void* pipe_cb, char* buffer, uint n);
+int pipe_reader_close(void* pipe_cb);
+int pipe_writer_close(void* pipe_cb);
+
 
 
 

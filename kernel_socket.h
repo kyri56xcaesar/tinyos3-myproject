@@ -58,6 +58,15 @@ typedef struct Socket_Control_Block {
 
 } SCB;
 
+typedef struct connection_request {
+
+	int admitted;
+	SCB* peer;
+
+	CondVar connected_cv;
+	rlnode queue_node;
+} con_req;
+
 
 
 

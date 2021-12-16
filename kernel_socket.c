@@ -6,10 +6,12 @@
 #include "kernel_socket.h"
 #include "kernel_sched.h"
 #include "kernel_proc.h"
+#include "kernel_cc.h"
 
 
 
-
+/* The port map table */
+SCB* PORT_MAP[MAX_PORT+1];
 
 
 int socket_write(void* socket_cb, const char* buffer, uint n)
@@ -24,7 +26,16 @@ int socket_read(void* socket_cb, char* buffer, uint n)
 
 int socket_close(void* socket_cb)
 {
-	return -1;
+	SCB* scb = (SCB*)socket_cb;
+	if(scb==NULL)
+		return -1;
+
+	PORT_MAP[scb->port]=NULL;
+
+	/* NOT SURE YET */
+	free(scb);
+
+	return 0;
 }
 
 
@@ -36,8 +47,7 @@ file_ops socket_file_ops = {
 	.Close = socket_close
 };
 
-/* The port map table */
-SCB* PORT_MAP[MAX_PORT+1];
+
 
 
 /**
@@ -144,6 +154,8 @@ int sys_Listen(Fid_t sock)
 	rlnode_init(&scb->listener_s.queue, NULL); 
 	scb->listener_s.req_available=COND_INIT;
 
+	PORT_MAP[scb->port] = scb;
+
 	return 0;
 }
 
@@ -173,7 +185,86 @@ int sys_Listen(Fid_t sock)
  */
 Fid_t sys_Accept(Fid_t lsock)
 {
-	return NOFILE;
+
+	if(lsock<0 || lsock>MAX_FILEID)
+		return -1;
+
+
+	SCB* lscb = CURPROC->FIDT[lsock]->streamobj;
+
+	if(PORT_MAP[lscb->port]==NULL)
+		return -1;
+
+	if(lscb==NULL || lscb->type != SOCKET_LISTENER)
+		return -1;
+
+	for(int i=0; i< MAX_FILEID; i++)
+	{
+		if(CURPROC->FIDT[i]==NULL)
+			break;
+		if(i==MAX_FILEID-1 && CURPROC->FIDT[i]!=NULL)
+			return -1;
+	}
+
+	lscb->refcount++;
+
+	while(is_rlist_empty(&lscb->listener_s.queue))
+	{
+		kernel_wait(&lscb->listener_s.req_available, SCHED_PIPE);
+	}
+
+	if(PORT_MAP[lscb->port]==NULL)
+		return -1;
+
+
+	con_req* req;
+
+	rlnode* popped_req;
+	popped_req = rlist_pop_front(&lscb->listener_s.queue);
+
+	req = (con_req*)popped_req;
+
+
+
+
+	req->admitted=1;
+
+	SCB* scb1 = req->peer;
+	Fid_t fid2 = sys_Socket(lscb->port);
+	SCB* scb2 = CURPROC->FIDT[fid2]->streamobj;
+
+	scb2->refcount++;
+
+	scb1->peer_s.peer = scb2;
+	scb2->peer_s.peer = scb1;
+
+	Pipe_CB* pipe1;
+	Pipe_CB* pipe2;
+
+	pipe1 = xmalloc(sizeof(Pipe_CB));
+	pipe2 = xmalloc(sizeof(Pipe_CB));
+
+	pipe1->reader=scb1->fcb;
+	pipe1->writer=scb2->fcb;
+	pipe2->reader=scb2->fcb;
+	pipe2->writer=scb1->fcb;
+
+	scb1->type = SOCKET_PEER;
+	scb2->type = SOCKET_PEER;
+
+	scb1->peer_s.write_pipe = pipe2;
+	scb1->peer_s.read_pipe = pipe1;
+	scb2->peer_s.write_pipe = pipe1;
+	scb2->peer_s.read_pipe = pipe2;
+
+	kernel_signal(&req->connected_cv);
+
+
+	lscb->refcount--;
+	scb2->refcount--;
+
+
+	return fid2;
 }
 
 
@@ -204,7 +295,41 @@ Fid_t sys_Accept(Fid_t lsock)
 */
 int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 {
-	return -1;
+	if(sock<0 || sock>MAX_FILEID)
+		return -1;
+
+	if(PORT_MAP[port] == NULL || port<= 0 || port > MAX_PORT+1)
+		return -1;
+
+	SCB* scb = CURPROC->FIDT[sock]->streamobj;
+
+	if(scb==NULL)
+		return -1;
+
+	scb->refcount++;
+
+	con_req* req = (con_req*)xmalloc(sizeof(con_req));
+	req->admitted=0;
+	req->peer=scb;
+	req->connected_cv=COND_INIT;
+
+	rlnode_init(&req->queue_node, req);
+
+	rlist_push_back(&PORT_MAP[port]->listener_s.queue, &req->queue_node);
+
+	kernel_signal(&PORT_MAP[port]->listener_s.req_available);
+
+	while(req->admitted==0)
+	{
+		if(kernel_timedwait(&req->connected_cv, SCHED_PIPE, timeout)==0)
+			return -1;
+	}
+
+	scb->refcount--;
+
+
+
+	return 0;
 }
 
 
@@ -236,6 +361,33 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 */
 int sys_ShutDown(Fid_t sock, shutdown_mode how)
 {
-	return -1;
+	if(sock<0 || sock>MAX_FILEID)
+		return -1;
+
+	SCB* scb = CURPROC->FIDT[sock]->streamobj;
+
+	if(scb->type != SOCKET_PEER)
+		return -1;
+
+	switch(how)
+	{
+		case SHUTDOWN_READ:
+			pipe_reader_close(scb->peer_s.read_pipe);
+
+			break;
+		case SHUTDOWN_WRITE:
+			pipe_writer_close(scb->peer_s.write_pipe);
+			break;
+		case SHUTDOWN_BOTH:
+			pipe_reader_close(scb->peer_s.read_pipe);
+			pipe_writer_close(scb->peer_s.write_pipe);
+			scb->fcb=NULL;
+			//free(scb);
+			break;
+		default:
+			break;
+	}
+
+	return 0;
 }
 
