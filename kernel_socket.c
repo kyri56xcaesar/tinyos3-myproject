@@ -16,12 +16,50 @@ SCB* PORT_MAP[MAX_PORT+1];
 
 int socket_write(void* socket_cb, const char* buffer, uint n)
 {
-	return -1;
+	SCB* scb = (SCB*)socket_cb;
+
+	if(scb==NULL)
+		return -1;
+	if(n<1)
+		return -1;
+	if(buffer==NULL)
+		return -1;
+	if(scb->fcb==NULL)
+		return -1;
+	if(scb->peer_s.write_pipe==NULL || scb->peer_s.read_pipe==NULL)
+		return -1;
+
+	int r;
+
+	r = pipe_write(scb->peer_s.write_pipe, buffer, n);
+	if(r==-1)
+		return -1;
+
+	return r;
 }
 
 int socket_read(void* socket_cb, char* buffer, uint n)
 {
-	return -1;
+	SCB* scb = (SCB*)socket_cb;
+
+	if(scb==NULL)
+		return -1;
+	if(n<1)
+		return -1;
+	if(buffer==NULL)
+		return -1;
+	if(scb->fcb==NULL)
+		return -1;
+	if(scb->peer_s.read_pipe==NULL)
+		return -1;
+
+	int r;
+
+	r = pipe_read(scb->peer_s.read_pipe, buffer, n);
+	if(r ==-1)
+		return -1;
+
+	return r;
 }
 
 int socket_close(void* socket_cb)
@@ -147,7 +185,7 @@ int sys_Listen(Fid_t sock)
 		return -1;
 	if(PORT_MAP[scb->port]!= NULL)
 		return -1;
-	if(scb->type==SOCKET_LISTENER)
+	if(scb->type==SOCKET_LISTENER || scb->type==SOCKET_PEER)
 		return -1;
 
 	scb->type=SOCKET_LISTENER;
@@ -189,6 +227,8 @@ Fid_t sys_Accept(Fid_t lsock)
 	if(lsock<0 || lsock>MAX_FILEID)
 		return -1;
 
+	if(CURPROC->FIDT[lsock]==NULL || CURPROC->FIDT[lsock]->streamobj==NULL)
+		return -1;
 
 	SCB* lscb = CURPROC->FIDT[lsock]->streamobj;
 
@@ -217,17 +257,19 @@ Fid_t sys_Accept(Fid_t lsock)
 		return -1;
 
 
-	con_req* req;
 
 	rlnode* popped_req;
 	popped_req = rlist_pop_front(&lscb->listener_s.queue);
 
-	req = (con_req*)popped_req;
-
+	con_req* req;
+	req = popped_req->cr;
 
 
 
 	req->admitted=1;
+
+	kernel_signal(&req->connected_cv);
+
 
 	SCB* scb1 = req->peer;
 	Fid_t fid2 = sys_Socket(lscb->port);
@@ -257,7 +299,6 @@ Fid_t sys_Accept(Fid_t lsock)
 	scb2->peer_s.write_pipe = pipe1;
 	scb2->peer_s.read_pipe = pipe2;
 
-	kernel_signal(&req->connected_cv);
 
 
 	lscb->refcount--;
@@ -298,12 +339,15 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 	if(sock<0 || sock>MAX_FILEID)
 		return -1;
 
-	if(PORT_MAP[port] == NULL || port<= 0 || port > MAX_PORT+1)
+	if(PORT_MAP[port] == NULL || port==NOPORT || port<= 0 || port > MAX_PORT)
 		return -1;
 
 	SCB* scb = CURPROC->FIDT[sock]->streamobj;
 
 	if(scb==NULL)
+		return -1;
+
+	if(scb->type != SOCKET_UNBOUND)
 		return -1;
 
 	scb->refcount++;
@@ -316,6 +360,8 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 	rlnode_init(&req->queue_node, req);
 
 	rlist_push_back(&PORT_MAP[port]->listener_s.queue, &req->queue_node);
+	assert(is_rlist_empty(&PORT_MAP[port]->listener_s.queue)==0);
+
 
 	kernel_signal(&PORT_MAP[port]->listener_s.req_available);
 
