@@ -26,7 +26,7 @@ int socket_write(void* socket_cb, const char* buffer, uint n)
 		return -1;
 	if(scb->fcb==NULL)
 		return -1;
-	if(scb->peer_s.write_pipe==NULL || scb->peer_s.read_pipe==NULL)
+	if(scb->peer_s.write_pipe==NULL || scb->peer_s.peer->peer_s.read_pipe==NULL)
 		return -1;
 
 	int r;
@@ -68,10 +68,31 @@ int socket_close(void* socket_cb)
 	if(scb==NULL)
 		return -1;
 
-	PORT_MAP[scb->port]=NULL;
+	if(scb->type == SOCKET_PEER)
+	{
+		pipe_writer_close(scb->peer_s.write_pipe);
+		pipe_reader_close(scb->peer_s.read_pipe);
+	}
 
-	/* NOT SURE YET */
-	free(scb);
+	if(scb->type == SOCKET_LISTENER)
+	{
+
+
+		while(!is_rlist_empty(&scb->listener_s.queue))
+		{
+			rlnode* node = rlist_pop_front(&scb->listener_s.queue);
+			free(node->cr);
+		}
+
+
+		PORT_MAP[scb->port]=NULL;
+		kernel_broadcast(&scb->listener_s.req_available);
+
+	}
+
+
+	if(scb->refcount<=0)
+		free(scb);
 
 	return 0;
 }
@@ -248,7 +269,7 @@ Fid_t sys_Accept(Fid_t lsock)
 
 	lscb->refcount++;
 
-	while(is_rlist_empty(&lscb->listener_s.queue))
+	while(is_rlist_empty(&lscb->listener_s.queue) && PORT_MAP[lscb->port]!=NULL)
 	{
 		kernel_wait(&lscb->listener_s.req_available, SCHED_PIPE);
 	}
@@ -419,16 +440,19 @@ int sys_ShutDown(Fid_t sock, shutdown_mode how)
 	{
 		case SHUTDOWN_READ:
 			pipe_reader_close(scb->peer_s.read_pipe);
+			scb->peer_s.read_pipe=NULL;
 
 			break;
 		case SHUTDOWN_WRITE:
 			pipe_writer_close(scb->peer_s.write_pipe);
+			scb->peer_s.write_pipe=NULL;
 			break;
 		case SHUTDOWN_BOTH:
 			pipe_reader_close(scb->peer_s.read_pipe);
+			scb->peer_s.read_pipe=NULL;
 			pipe_writer_close(scb->peer_s.write_pipe);
+			scb->peer_s.write_pipe=NULL;
 			scb->fcb=NULL;
-			//free(scb);
 			break;
 		default:
 			break;
