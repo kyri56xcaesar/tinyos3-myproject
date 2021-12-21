@@ -13,7 +13,7 @@
 /* The port map table */
 SCB* PORT_MAP[MAX_PORT+1];
 
-
+/* Associated with the Write end of the argument socket.*/
 int socket_write(void* socket_cb, const char* buffer, uint n)
 {
 	SCB* scb = (SCB*)socket_cb;
@@ -38,6 +38,7 @@ int socket_write(void* socket_cb, const char* buffer, uint n)
 	return r;
 }
 
+/* Associated with the Read end of the argument socket.*/
 int socket_read(void* socket_cb, char* buffer, uint n)
 {
 	SCB* scb = (SCB*)socket_cb;
@@ -62,18 +63,21 @@ int socket_read(void* socket_cb, char* buffer, uint n)
 	return r;
 }
 
+/* Closing a socket holds a particularity depending on the socket type.*/
 int socket_close(void* socket_cb)
 {
 	SCB* scb = (SCB*)socket_cb;
 	if(scb==NULL)
 		return -1;
 
+	/* A peer socket needs to be detached from its pipes.*/
 	if(scb->type == SOCKET_PEER)
 	{
 		pipe_writer_close(scb->peer_s.write_pipe);
 		pipe_reader_close(scb->peer_s.read_pipe);
 	}
 
+	/* A listener has to clear its queue list and also signal/broadcast when its closed. @dependancies.*/
 	if(scb->type == SOCKET_LISTENER)
 	{
 
@@ -84,13 +88,13 @@ int socket_close(void* socket_cb)
 			free(node->cr);
 		}
 
-
+		/* RESETING PORT MAP.*/
 		PORT_MAP[scb->port]=NULL;
 		kernel_broadcast(&scb->listener_s.req_available);
 
 	}
 
-
+	/* In every case when closing a socket if its reference count is zero. It can be freed.*/
 	if(scb->refcount<=0)
 		free(scb);
 
@@ -191,12 +195,14 @@ Fid_t sys_Socket(port_t port)
  */
 int sys_Listen(Fid_t sock)
 {
-	
+	/* Make necessary checks. */
+	/* fid valid*/
 	if(sock<0 || sock>MAX_FILEID)
 		return -1;
 	PCB* curp = CURPROC;
 	assert(curp!=NULL);
 	FCB* curFCB = curp->FIDT[sock];
+	/* FCB valid*/
 	if(curFCB==NULL)
 		return -1;
 	SCB* scb = curFCB->streamobj;
@@ -209,10 +215,13 @@ int sys_Listen(Fid_t sock)
 	if(scb->type==SOCKET_LISTENER || scb->type==SOCKET_PEER)
 		return -1;
 
+	/* Make the socket a Listener*/
 	scb->type=SOCKET_LISTENER;
+	/* Initialize it. */
 	rlnode_init(&scb->listener_s.queue, NULL); 
 	scb->listener_s.req_available=COND_INIT;
 
+	/* Hold the PortMap port.*/
 	PORT_MAP[scb->port] = scb;
 
 	return 0;
@@ -245,6 +254,7 @@ int sys_Listen(Fid_t sock)
 Fid_t sys_Accept(Fid_t lsock)
 {
 
+	/* Make the necessary checks before continuing.*/
 	if(lsock<0 || lsock>MAX_FILEID)
 		return -1;
 
@@ -267,18 +277,24 @@ Fid_t sys_Accept(Fid_t lsock)
 			return -1;
 	}
 
+
+
+
+	/* Stasis on the listener until a new request is made or the listener is closed.*/
 	lscb->refcount++;
 
 	while(is_rlist_empty(&lscb->listener_s.queue) && PORT_MAP[lscb->port]!=NULL)
 	{
 		kernel_wait(&lscb->listener_s.req_available, SCHED_PIPE);
 	}
+	/* Waking up... A new request has been made.*/
 
+	/* Check if listener has been closed after waking up. */
 	if(PORT_MAP[lscb->port]==NULL)
 		return -1;
 
 
-
+	/* Extract the request fromt he listener's queue and honor it.*/
 	rlnode* popped_req;
 	popped_req = rlist_pop_front(&lscb->listener_s.queue);
 
@@ -286,24 +302,33 @@ Fid_t sys_Accept(Fid_t lsock)
 	req = popped_req->cr;
 
 
-
+	/* Mark request as admitted.*/
 	req->admitted=1;
 
+	/* Signal the socket that made the request to let it know connection will be established.*/
 	kernel_signal(&req->connected_cv);
 
-
+	/* socket that made the connection request */
 	SCB* scb1 = req->peer;
+	/* Create the new (peer)socket for the connection*/
 	Fid_t fid2 = sys_Socket(lscb->port);
+	/* secondary socket to which connection is made.*/
 	SCB* scb2 = CURPROC->FIDT[fid2]->streamobj;
 
+	/* Mark refcount.*/
 	scb2->refcount++;
 
+	/* Connect the peer sockets to each other. */
 	scb1->peer_s.peer = scb2;
 	scb2->peer_s.peer = scb1;
 
+
+	/* Peer sockets need a set of 2 pipes to be connected.*/
 	Pipe_CB* pipe1;
 	Pipe_CB* pipe2;
 
+
+	/* Create 2 Pipe control blocks and connect them appropriately on the two peer sockets.*/
 	pipe1 = xmalloc(sizeof(Pipe_CB));
 	pipe2 = xmalloc(sizeof(Pipe_CB));
 
@@ -323,6 +348,7 @@ Fid_t sys_Accept(Fid_t lsock)
 
 
 	lscb->refcount--;
+
 	scb2->refcount--;
 
 
@@ -357,6 +383,8 @@ Fid_t sys_Accept(Fid_t lsock)
 */
 int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 {
+
+	/* Make the necessary checks before continuing... */
 	if(sock<0 || sock>MAX_FILEID)
 		return -1;
 
@@ -371,8 +399,13 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 	if(scb->type != SOCKET_UNBOUND)
 		return -1;
 
+
+
+	/* A connection to be done. on @port at socket @sock with the socket that syscall @ACCEPT will handle.*/
+	/* reference count on this calling socket to be increased.*/
 	scb->refcount++;
 
+	/* build and initialize a connection requst.*/
 	con_req* req = (con_req*)xmalloc(sizeof(con_req));
 	req->admitted=0;
 	req->peer=scb;
@@ -380,22 +413,28 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 
 	rlnode_init(&req->queue_node, req);
 
+
+	/* Input it in the back of the queue of the listener socket.*/
 	rlist_push_back(&PORT_MAP[port]->listener_s.queue, &req->queue_node);
 	assert(is_rlist_empty(&PORT_MAP[port]->listener_s.queue)==0);
 
-
+	/* Signal that there is a request in order to retrace @accept and assemble the connection. */
 	kernel_signal(&PORT_MAP[port]->listener_s.req_available);
 
+
+	/* Wait until connection is made. TIMEOUT assigned. Exit if timeout exceeds.*/
 	while(req->admitted==0)
 	{
 		if(kernel_timedwait(&req->connected_cv, SCHED_PIPE, timeout)==0)
 			return -1;
 	}
 
+
+	/* Decrease reference count after everything is done.*/
 	scb->refcount--;
 
 
-
+	/* Return 0 since everything went smoothly~ :D*/
 	return 0;
 }
 
@@ -428,6 +467,7 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 */
 int sys_ShutDown(Fid_t sock, shutdown_mode how)
 {
+	/* Check the usuals.*/
 	if(sock<0 || sock>MAX_FILEID)
 		return -1;
 
@@ -436,6 +476,7 @@ int sys_ShutDown(Fid_t sock, shutdown_mode how)
 	if(scb->type != SOCKET_PEER)
 		return -1;
 
+	/* Shuting down cases. Pipe system calls closing funcs are called.*/
 	switch(how)
 	{
 		case SHUTDOWN_READ:
