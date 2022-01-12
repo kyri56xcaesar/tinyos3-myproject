@@ -97,15 +97,15 @@ int pipe_read(void* pipe_cb, char* buffer, uint n)
 	/* Good to go*/
 
 
+	// Disable preemption
 	preempt_off;
 
 	uint count=0;
 
-	// @TODO +while BUFFER is not empty
+	
 	while(count<n)
 	{
-		// @TODO examine cases
-		// @TODO check if possible read --> Reading is before Writing
+		
 		
 		if(pipCB->w_position==pipCB->r_position && pipCB->writer!=NULL)
 			kernel_broadcast(&pipCB->has_space);
@@ -129,9 +129,7 @@ int pipe_read(void* pipe_cb, char* buffer, uint n)
 		}
 
 		
-		// GT KSUPNISA
-		// AMA ESVISE O WRITER DIAVASE OTI EXEI MEINEI
-		// AMA ZEI O WRITER   
+		
 		buffer[count] = pipCB->BUFFER[pipCB->r_position%PIPE_BUFFER_SIZE];
 
 		pipCB->r_position++;

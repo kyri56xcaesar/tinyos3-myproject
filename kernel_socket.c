@@ -429,6 +429,8 @@ int sys_Connect(Fid_t sock, port_t port, timeout_t timeout)
 			return -1;
 	}
 
+	// Request has been handled at this point.
+
 
 	/* Decrease reference count after everything is done.*/
 	scb->refcount--;
@@ -473,6 +475,7 @@ int sys_ShutDown(Fid_t sock, shutdown_mode how)
 
 	SCB* scb = CURPROC->FIDT[sock]->streamobj;
 
+	// Shutdown allowed only at peer sockets
 	if(scb->type != SOCKET_PEER)
 		return -1;
 
